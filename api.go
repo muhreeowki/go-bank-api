@@ -30,7 +30,7 @@ func NewAPIServer(listenAddr string, store Storage) *APIServer {
 func (s *APIServer) Run() {
 	router := mux.NewRouter()
 	router.HandleFunc("/account", makeHTTPHandlerFunc(s.handleAccount))
-	router.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandlerFunc(s.handleAccountByID)))
+	router.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandlerFunc(s.handleAccountByID), s.store))
 	router.HandleFunc("/transfer", makeHTTPHandlerFunc(s.handleTransfer))
 
 	log.Println("JSON API is running on port: ", s.listenAddr)
@@ -166,13 +166,31 @@ func validateJWT(tokenString string) (*jwt.Token, error) {
 	})
 }
 
-func withJWTAuth(handlerFunc http.HandlerFunc) http.HandlerFunc {
+func withJWTAuth(handlerFunc http.HandlerFunc, store Storage) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tokenString := r.Header.Get("x-jwt-token")
 
-		_, err := validateJWT(tokenString)
+		token, err := validateJWT(tokenString)
+		if !token.Valid || err != nil {
+			permissionDenied(w)
+			return
+		}
+
+		userID, err := getID(r)
 		if err != nil {
-			writeJSON(w, http.StatusForbidden, APIError{Error: "invalid token"})
+			permissionDenied(w)
+			return
+		}
+
+		account, err := store.GetAccountByID(userID)
+		if err != nil {
+			permissionDenied(w)
+			return
+		}
+
+		claims := token.Claims.(jwt.MapClaims)
+		if account.Number != int(claims["number"].(float64)) || claims["name"] != account.FirstName+" "+account.LastName {
+			permissionDenied(w)
 			return
 		}
 
@@ -185,8 +203,10 @@ func createJWT(account *Account) (string, error) {
 
 	// Create the Claims
 	claims := &jwt.MapClaims{
-		"expiresAt":     jwt.NewNumericDate(time.Unix(1516239022, 0)),
-		"accountNumber": account.Number,
+		"expires_at": jwt.NewNumericDate(time.Unix(1516239022, 0)),
+		"number":     account.Number,
+		"id":         account.ID,
+		"name":       account.FirstName + " " + account.LastName,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -203,4 +223,8 @@ func getID(r *http.Request) (int, error) {
 		return id, fmt.Errorf("invalid id given %s", idStr)
 	}
 	return id, nil
+}
+
+func permissionDenied(w http.ResponseWriter) {
+	writeJSON(w, http.StatusForbidden, APIError{Error: "permission denied"})
 }

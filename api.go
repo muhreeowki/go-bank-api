@@ -12,8 +12,8 @@ import (
 
 // APIServer is a struct that represents an API server
 type APIServer struct {
-	listenAddr string
 	store      Storage
+	listenAddr string
 }
 
 // APIFunc is a http.HanderFunc that returns an error
@@ -27,8 +27,8 @@ type APIError struct {
 // NewAPIServer creates a new APIServer with the given listen address
 func NewAPIServer(listenAddr string, store Storage) *APIServer {
 	return &APIServer{
-		listenAddr: listenAddr,
 		store:      store,
+		listenAddr: listenAddr,
 	}
 }
 
@@ -56,6 +56,7 @@ func (s *APIServer) Run() {
 	router := mux.NewRouter()
 	router.HandleFunc("/account", MakeHTTPHandlerFunc(s.handleAccount))
 	router.HandleFunc("/account/{id}", MakeHTTPHandlerFunc(s.handleAccountByID))
+	router.HandleFunc("/transfer", MakeHTTPHandlerFunc(s.handleTransfer))
 
 	log.Println("JSON API is running on port: ", s.listenAddr)
 
@@ -109,6 +110,7 @@ func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(createAccountReq); err != nil {
 		return err
 	}
+	defer r.Body.Close()
 
 	account := NewAccount(createAccountReq.FirstName, createAccountReq.LastName)
 	if err := s.store.CreateAccount(account); err != nil {
@@ -130,7 +132,14 @@ func (s *APIServer) handleDeleteAccountByID(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *APIServer) handleTransfer(w http.ResponseWriter, r *http.Request) error {
-	return nil
+	transferReq := new(TransferRequest)
+	if err := json.NewDecoder(r.Body).Decode(transferReq); err != nil {
+		return fmt.Errorf("bad Request: %s", err)
+	}
+	defer r.Body.Close()
+
+	// msg := fmt.Sprintf("successfully transfered amount %s to account %s", transferReq.Amount, transferReq.ToAccount)
+	return WriteJSON(w, http.StatusOK, transferReq)
 }
 
 func getID(r *http.Request) (int, error) {

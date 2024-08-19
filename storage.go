@@ -56,7 +56,7 @@ func (s *PostgresStore) CreateAccount(account *Account) error {
 	query := `INSERT INTO accounts
   (first_name, last_name, number, balance, created_at)
   VALUES ($1, $2, $3, $4, $5)`
-	resp, err := s.db.Query(
+	_, err := s.db.Query(
 		query,
 		account.FirstName,
 		account.LastName,
@@ -67,7 +67,6 @@ func (s *PostgresStore) CreateAccount(account *Account) error {
 	if err != nil {
 		return fmt.Errorf("could not get accounts: %v", err)
 	}
-	fmt.Printf("%+v\n", resp)
 	return nil
 }
 

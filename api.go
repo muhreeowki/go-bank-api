@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"time"
 
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 )
 
@@ -14,14 +17,6 @@ import (
 type APIServer struct {
 	store      Storage
 	listenAddr string
-}
-
-// APIFunc is a http.HanderFunc that returns an error
-type APIFunc func(w http.ResponseWriter, r *http.Request) error
-
-type APIError struct {
-	Error string `json:"error"`
-	Code  int    `json:"code"`
 }
 
 // NewAPIServer creates a new APIServer with the given listen address
@@ -32,31 +27,11 @@ func NewAPIServer(listenAddr string, store Storage) *APIServer {
 	}
 }
 
-// WriteJSON writes a JSON response with the given status code and object
-func WriteJSON(w http.ResponseWriter, status int, v any) error {
-	// Set the status code and content type for the response
-	w.WriteHeader(status)
-	w.Header().Add("Content-Type", "application/json")
-	// Encode the v object to JSON
-	err := json.NewEncoder(w).Encode(v)
-	return err
-}
-
-// MakeHTTPHandlerFunc wraps an APIFunc to handle errors and write JSON responses
-func MakeHTTPHandlerFunc(fn APIFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if err := fn(w, r); err != nil {
-			// handle error here
-			WriteJSON(w, http.StatusBadRequest, APIError{Error: err.Error()})
-		}
-	}
-}
-
 func (s *APIServer) Run() {
 	router := mux.NewRouter()
-	router.HandleFunc("/account", MakeHTTPHandlerFunc(s.handleAccount))
-	router.HandleFunc("/account/{id}", MakeHTTPHandlerFunc(s.handleAccountByID))
-	router.HandleFunc("/transfer", MakeHTTPHandlerFunc(s.handleTransfer))
+	router.HandleFunc("/account", makeHTTPHandlerFunc(s.handleAccount))
+	router.HandleFunc("/account/{id}", withJWTAuth(makeHTTPHandlerFunc(s.handleAccountByID)))
+	router.HandleFunc("/transfer", makeHTTPHandlerFunc(s.handleTransfer))
 
 	log.Println("JSON API is running on port: ", s.listenAddr)
 
@@ -90,7 +65,7 @@ func (s *APIServer) handleGetAccounts(w http.ResponseWriter, r *http.Request) er
 	if err != nil {
 		return err
 	}
-	return WriteJSON(w, http.StatusOK, accounts)
+	return writeJSON(w, http.StatusOK, accounts)
 }
 
 func (s *APIServer) handleGetAccountByID(w http.ResponseWriter, r *http.Request) error {
@@ -102,7 +77,7 @@ func (s *APIServer) handleGetAccountByID(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return err
 	}
-	return WriteJSON(w, http.StatusOK, account)
+	return writeJSON(w, http.StatusOK, account)
 }
 
 func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) error {
@@ -117,7 +92,14 @@ func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 
-	return WriteJSON(w, http.StatusCreated, account)
+	// Generate JWT token
+	tokenString, err := createJWT(account)
+	if err != nil {
+		return err
+	}
+	fmt.Println("JWT Token: ", tokenString)
+
+	return writeJSON(w, http.StatusCreated, account)
 }
 
 func (s *APIServer) handleDeleteAccountByID(w http.ResponseWriter, r *http.Request) error {
@@ -128,7 +110,7 @@ func (s *APIServer) handleDeleteAccountByID(w http.ResponseWriter, r *http.Reque
 	if err := s.store.DeleteAccount(id); err != nil {
 		return err
 	}
-	return WriteJSON(w, http.StatusOK, "successfully deleted account")
+	return writeJSON(w, http.StatusOK, "successfully deleted account")
 }
 
 func (s *APIServer) handleTransfer(w http.ResponseWriter, r *http.Request) error {
@@ -139,9 +121,81 @@ func (s *APIServer) handleTransfer(w http.ResponseWriter, r *http.Request) error
 	defer r.Body.Close()
 
 	// msg := fmt.Sprintf("successfully transfered amount %s to account %s", transferReq.Amount, transferReq.ToAccount)
-	return WriteJSON(w, http.StatusOK, transferReq)
+	return writeJSON(w, http.StatusOK, transferReq)
 }
 
+// APIFunc is a http.HanderFunc that returns an error
+type APIFunc func(w http.ResponseWriter, r *http.Request) error
+
+// APIError is a struct that represents a custom API error
+type APIError struct {
+	Error string `json:"error"`
+	Code  int    `json:"code"`
+}
+
+// writeJSON writes a JSON response with the given status code and object
+func writeJSON(w http.ResponseWriter, status int, v any) error {
+	// Set the status code and content type for the response
+	w.WriteHeader(status)
+	w.Header().Add("Content-Type", "application/json")
+	// Encode the v object to JSON
+	err := json.NewEncoder(w).Encode(v)
+	return err
+}
+
+// makeHTTPHandlerFunc wraps an APIFunc to handle errors and write JSON responses
+func makeHTTPHandlerFunc(apiFunc APIFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := apiFunc(w, r); err != nil {
+			// handle error here
+			writeJSON(w, http.StatusBadRequest, APIError{Error: err.Error()})
+		}
+	}
+}
+
+func validateJWT(tokenString string) (*jwt.Token, error) {
+	secret := os.Getenv("JWT_SECRET")
+	return jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Don't forget to validate the alg is what you expect:
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+
+		// hmacSampleSecret is a []byte containing your secret, e.g. []byte("my_secret_key")
+		return []byte(secret), nil
+	})
+}
+
+func withJWTAuth(handlerFunc http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tokenString := r.Header.Get("x-jwt-token")
+
+		_, err := validateJWT(tokenString)
+		if err != nil {
+			writeJSON(w, http.StatusForbidden, APIError{Error: "invalid token"})
+			return
+		}
+
+		handlerFunc(w, r)
+	}
+}
+
+func createJWT(account *Account) (string, error) {
+	mySigningKey := []byte(os.Getenv("JWT_SECRET"))
+
+	// Create the Claims
+	claims := &jwt.MapClaims{
+		"expiresAt":     jwt.NewNumericDate(time.Unix(1516239022, 0)),
+		"accountNumber": account.Number,
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	ss, err := token.SignedString(mySigningKey)
+
+	return ss, err
+}
+
+// getID returns the id from the request
 func getID(r *http.Request) (int, error) {
 	idStr := mux.Vars(r)["id"]
 	id, err := strconv.Atoi(idStr)
